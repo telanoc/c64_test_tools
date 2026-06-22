@@ -275,6 +275,8 @@ test_rand() {
   return 1;
 }
 
+uint32_t loop_count = 0;
+
 void
 loop() {
   test_and_print("1111", test_1);
@@ -283,4 +285,7 @@ loop() {
   test_and_print("1010", test_10);
   // TODO: minimum row refresh cycle of 4 ms can't be guaranteed with the current RNG, let's not do this
   // test_and_print("rand", test_rand); 
+  // Print a count of how many times we've been through the loop
+  Serial.print("Test loops: ");
+  Serial.println(++loop_count);
 }
