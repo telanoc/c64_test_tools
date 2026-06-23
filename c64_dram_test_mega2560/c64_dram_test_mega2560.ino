@@ -160,6 +160,7 @@ setup()
   // PA0..7 = address generator (RAM A0..7/8..15 multiplexed)
   // PC0..4 = RAM control
   // PF0..7 = I/O1..4
+  // PB7    = Built-in LED
   
   // Pin direction: 0 = in/pullup, 1 = out
   DDRA     = 0b11111111;     DDRC     = 0b00001111;     DDRF    = 0b00000000;    
@@ -183,8 +184,41 @@ setup()
   // PA2 (D24) -----0-- A2   // PC2 (D35) -----1-- A10  // PF2 (A2) -----0-- D2
   // PA1 (D23) ------0- A1   // PC1 (D36) ------1- A9   // PF1 (A1) ------0- D1
   // PA0 (D22) -------0 A0   // PC0 (D37) -------1 A8   // PF0 (A0) -------0 D0
+
+  // Set up to write to LED and then turn it on
+  DDRB     |= 0b10000000;  // Set (D13) as an output
+  PORTB    |= 0b10000000;  // say "we're testing"
 }
 
+void led_blink(int len)
+{
+  // send an "S" or an "O"
+  for (int i = 0; i < 3; i++)
+  {
+    PORTB |= 0b10000000; // LED on
+    delay(len);
+    PORTB &= 0b01111111; // LED off
+    delay(200);          // inter-(dot|dash) delay
+  }
+  delay(300);            // inter-char delay
+}
+
+void flash_led()
+{
+  sei(); // if we got here we skipped this in test_and_print()
+
+  PORTB &= 0b01111111; // Turn LED off for a moment
+  delay(2000);
+
+  // Send out an SOS forever
+  while (1)
+  {
+    led_blink(200); // S
+    led_blink(500); // O
+    led_blink(200); // S
+    delay(1500);
+  }
+}
 
 void
 test_and_print(char *title, int (*test_func)()) 
@@ -197,6 +231,8 @@ test_and_print(char *title, int (*test_func)())
     Serial.println("PASS");
   } else {
     Serial.println("FAIL!!!");
+    Serial.flush(); // to be sure
+    flash_led();
   }
   sei();
 }
