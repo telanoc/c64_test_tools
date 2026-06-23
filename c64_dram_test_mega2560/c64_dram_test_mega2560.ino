@@ -25,8 +25,8 @@
                D0  | D21[ ][ ]D20  /  D1              
     RAM A1 --- A1  | D23[ ][ ]D22  \  A0 --- RAM A0
     RAM A3 --- A3  | D25[ ][ ]D24  /  A2 --- RAM A2
-    RAM A5 --- A5  | D27[ ][ ]D26  \  A4 --- RAM A5
-    RAM A7 --- A7  | D29[ ][ ]D28  /  A6 --- RAM A7
+    RAM A5 --- A5  | D27[ ][ ]D26  \  A4 --- RAM A4
+    RAM A7 --- A7  | D29[ ][ ]D28  /  A6 --- RAM A6
                C6  | D31[ ][ ]D30  \  C7
                    +----------------
 
