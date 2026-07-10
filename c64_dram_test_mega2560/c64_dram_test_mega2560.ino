@@ -81,7 +81,28 @@
   - Inputs Ax, /OE, /WE, /RAS, /CAS must be high-Z
 
   2. Run this test and check serial output (115200 bps) for PASS/FAIL test cases.
-  
+     Output of the test in progress may look like the following contrived example
+     made by messing with interconnect wires while the rand test was happening:
+
+      1111... PASS
+      0000... PASS
+      0101... PASS
+      1010... PASS
+      rand seed: B0490D30
+      rand... PASS
+      Test loops: 311
+
+      1111... PASS
+      0000... PASS
+      0101... PASS
+      1010... PASS
+      rand seed: BC23EA0F
+      rand... Error at row 144 column 61 Expected: B Read: 1
+      FAIL!!!
+
+     If not connected via serial, watch built in LED for steady on condition.  If
+     an error occurs, it will blink "SOS" in Morse code.  Three short, three long,
+     and three short blinks, repeatedly.
  */
 
 #define nOE  0
@@ -93,16 +114,60 @@
 #define CLRB(port, b)  port &= ~_BV(b)
 #define ISSET(port, b) ((port & _BV(b)) != 0)
 
-uint32_t prng_state;
+uint32_t prng_state = 0xdecafbad;
+
+/* When DO_TESTING is defined a timing check of generating a rows 
+ * worth of random data and writing it to a row is performed and
+ * then a timing of writing the constant values is done.  Those
+ * are displayed at the beginning of the test loop.
+ * 
+ * Timer1 provides the measurements while interrupts are disabled. Sample
+ * output is in microseconds and can vary with compiler settings.
+ *
+ * Time to generate and fill a row: 990
+ * Time to fill with a constant   : 672
+ *
+ */
+//define DO_TESTING
+
+/* The inline assembly version is about 3.5 times faster than
+ * the pure C version.  The pure C works fine, but does take up
+ * some valuable time.  Results of the two were compared with
+ * the same starting seed and 10000 iterations.
+ */
+#define USE_INLINE_ASM_PRNG
+
+#define LED_OFF (PORTB &= 0b01111111)
+#define LED_ON  (PORTB |= 0b10000000) 
+
+/*
+ * A union to hold the pre-computed PRNG data for the row being tested.
+ * An optimized inline assembly xorshift32 prng() is now used which can
+ * generate a whole row of 256 nybbles (32 qwords, 128 bytes) in about
+ * 216 microseconds.  This is fast enough to generate a row of random
+ * data and write that row to ram for all 256 columns at once, which
+ * takes about 1100 microseconds per row.
+ */
+#define PRNG_DATA_SIZE 32
+typedef union {
+    uint32_t u32[PRNG_DATA_SIZE]; 
+    uint8_t  b[PRNG_DATA_SIZE*4]; // 128 bytes, used as 256 nybbles
+} prng_bytes;
+prng_bytes prng_data;
 
 /* Not sure what's wrong with Arduino but you MUST split the return type 
  * and function name in separate lines or you'll get weird compiler errors
  * on perfectly okay C code.
  */
-inline void
-w(uint8_t row, uint8_t col, uint8_t v) 
+
+/* 23 JUN 2026: [PWC] - The problem is apparently a bug in the IDE when 
+ * it tries to generate function prototypes for you.  A workaround is to
+ * provide a function prototype for the first function in your code.
+ */
+inline void w(uint8_t row, uint8_t col, uint8_t v);
+
+inline void w(uint8_t row, uint8_t col, uint8_t v) 
 {
-    DDRF |= 0b00001111;                               // Set I/Ox as OUTPUT
     PORTF = (PORTF & 0b11110000) | (v & 0b00001111);  // set i/o data
     PORTA = row;                                      // set row
     CLRB(PORTC, nRAS);                                // RAS down
@@ -114,12 +179,9 @@ w(uint8_t row, uint8_t col, uint8_t v)
     SETB(PORTC, nWE);                                 // WE up
     SETB(PORTC, nRAS);                                // RAS up
     SETB(PORTC, nCAS);                                // CAS up
-    DDRF &= 0b11110000;                               // Set I/Ox as INPUT again
-    PORTF |= 0b00001111;                              // keep pull-ups
 }
 
-inline uint8_t
-r(uint8_t row, uint8_t col)
+inline uint8_t r(uint8_t row, uint8_t col)
 {
     // read
     PORTA = row;                                      // set row
@@ -128,30 +190,106 @@ r(uint8_t row, uint8_t col)
     PORTA = col;                                      // set col
     CLRB(PORTC, nCAS);                                // CAS down
     CLRB(PORTC, nOE);                                 // OE down
-    asm("nop");
-    
+    asm("nop");   
     uint8_t v = PINF & 0b00001111;                    // do READ
-
     SETB(PORTC, nOE);                                 // OE up
     SETB(PORTC, nRAS);                                // RAS up
     SETB(PORTC, nCAS);                                // CAS up
-
     return v;
 }
 
-inline uint8_t
-prng()
+#ifdef USE_INLINE_ASM_PRNG
+
+inline uint32_t prng(uint32_t x) 
 {
-  uint32_t x = prng_state;
+    uint32_t temp = prng_state;
+    asm volatile(
+        // ==========================================
+        // 1. p ^= p << 13
+        // ==========================================
+        "movw %A1, %A0    \n\t" 
+        "movw %C1, %C0    \n\t" 
+        // Byte shift left by 8 bits
+        "mov %D1, %C1     \n\t"
+        "mov %C1, %B1     \n\t"
+        "mov %B1, %A1     \n\t"
+        "clr %A1          \n\t"
+        // Unrolled 5-bit left shift (No counter loop!)
+        "lsl %A1 \n\t rol %B1 \n\t rol %C1 \n\t rol %D1 \n\t"
+        "lsl %A1 \n\t rol %B1 \n\t rol %C1 \n\t rol %D1 \n\t"
+        "lsl %A1 \n\t rol %B1 \n\t rol %C1 \n\t rol %D1 \n\t"
+        "lsl %A1 \n\t rol %B1 \n\t rol %C1 \n\t rol %D1 \n\t"
+        "lsl %A1 \n\t rol %B1 \n\t rol %C1 \n\t rol %D1 \n\t"
+        // XOR result
+        "eor %A0, %A1     \n\t"
+        "eor %B0, %B1     \n\t"
+        "eor %C0, %C1     \n\t"
+        "eor %D0, %D1     \n\t"
+
+        // ==========================================
+        // 2. p ^= p >> 17
+        // ==========================================
+        "movw %A1, %A0    \n\t" 
+        "movw %C1, %C0    \n\t"
+        // Byte shift right by 16 bits
+        "mov %A1, %C1     \n\t"
+        "mov %B1, %D1     \n\t"
+        "clr %C1          \n\t"
+        "clr %D1          \n\t"
+        // 1-bit right shift
+        "lsr %B1          \n\t"
+        "ror %A1          \n\t"
+        // XOR result
+        "eor %A0, %A1     \n\t"
+        "eor %B0, %B1     \n\t"
+        "eor %C0, %C1     \n\t"
+        "eor %D0, %D1     \n\t"
+
+        // ==========================================
+        // 3. p ^= p << 5
+        // ==========================================
+        "movw %A1, %A0    \n\t" 
+        "movw %C1, %C0    \n\t"
+        // Unrolled 5-bit left shift
+        "lsl %A1 \n\t rol %B1 \n\t rol %C1 \n\t rol %D1 \n\t"
+        "lsl %A1 \n\t rol %B1 \n\t rol %C1 \n\t rol %D1 \n\t"
+        "lsl %A1 \n\t rol %B1 \n\t rol %C1 \n\t rol %D1 \n\t"
+        "lsl %A1 \n\t rol %B1 \n\t rol %C1 \n\t rol %D1 \n\t"
+        "lsl %A1 \n\t rol %B1 \n\t rol %C1 \n\t rol %D1 \n\t"
+        // XOR result
+        "eor %A0, %A1     \n\t"
+        "eor %B0, %B1     \n\t"
+        "eor %C0, %C1     \n\t"
+        "eor %D0, %D1     \n\t"
+
+        : "+r" (x), "=&r" (temp) 
+        :                        
+        : // No clobbers needed anymore! r26 is free.
+    );
+    prng_state = x;
+    return x;
+}
+#else
+// modified to match function signature of asm version
+inline uint32_t prng(uint32_t seed)
+{
+  uint32_t x = seed;
   x ^= x << 13;
-  x ^= x << 17;
+  x ^= x >> 17;
   x ^= x << 5;
   prng_state = x;
-  return x & 0xff;
+  return x;
+}
+#endif
+
+void fill_prng_data()
+{
+  for (int i = 0; i < PRNG_DATA_SIZE; i++) {
+    prng_data.u32[i] = prng(prng_state);
+  }   
 }
 
-void
-setup() 
+void setup() 
 {
   Serial.begin(115200);
 
@@ -186,8 +324,45 @@ setup()
   // PA0 (D22) -------0 A0   // PC0 (D37) -------1 A8   // PF0 (A0) -------0 D0
 
   // Set up to write to LED and then turn it on
-  DDRB     |= 0b10000000;  // Set (D13) as an output
-  PORTB    |= 0b10000000;  // say "we're testing"
+  DDRB     |= 0b10000000;  // Set LED pin (D13) as an output
+  LED_ON                ;  // Say "we're testing"
+
+#ifdef DO_TESTING
+  // Timer1 runs at 2 ticks/usec and does not require interrupts.
+  TCCR1A = 0;
+  TCCR1B = _BV(CS11);     // Prescaler 8: 0.5 usec/tick at 16 MHz
+  TIMSK1 = 0;
+  TIFR1 = _BV(TOV1);
+#endif
+
+  fill_prng_data();  // Fill data one time to start
+}
+
+typedef struct {
+  bool valid;
+  uint8_t row;
+  uint8_t col;
+  uint8_t expected;
+  uint8_t actual;
+} test_error_data;
+
+test_error_data last_error = { false, 0, 0, 0, 0 };
+
+int record_error_data(uint8_t row, uint8_t col, uint8_t expected, uint8_t actual)
+{
+  last_error = { true, row, col, expected, actual };
+  return 0;
+}
+
+void print_error_data()
+{
+  if (!last_error.valid)
+    return;
+
+  Serial.print("Error at row "); Serial.print(last_error.row);
+  Serial.print(" column "); Serial.print(last_error.col);
+  Serial.print(" Expected: "); Serial.print(last_error.expected, HEX);
+  Serial.print(" Read: "); Serial.println(last_error.actual, HEX);
 }
 
 void led_blink(int len)
@@ -195,9 +370,9 @@ void led_blink(int len)
   // send an "S" or an "O"
   for (int i = 0; i < 3; i++)
   {
-    PORTB |= 0b10000000; // LED on
+    LED_ON;
     delay(len);
-    PORTB &= 0b01111111; // LED off
+    LED_OFF;
     delay(200);          // inter-(dot|dash) delay
   }
   delay(300);            // inter-char delay
@@ -205,10 +380,8 @@ void led_blink(int len)
 
 void flash_led()
 {
-  sei(); // if we got here we skipped this in test_and_print()
-
-  PORTB &= 0b01111111; // Turn LED off for a moment
-  delay(2000);
+  LED_OFF;     // Turn LED off
+  delay(2000); //   for just a moment
 
   // Send out an SOS forever
   while (1)
@@ -220,29 +393,34 @@ void flash_led()
   }
 }
 
-void
-test_and_print(char *title, int (*test_func)()) 
+void test_and_print(const char *title, int (*test_func)()) 
 {
   Serial.print(title);
   Serial.print("... ");
   Serial.flush();
+
+  last_error.valid = false;
+  uint8_t sreg = SREG;
   cli();
-  if ((*test_func)()) {
+  int passed = (*test_func)();
+  SREG = sreg;
+
+  if (passed) {
     Serial.println("PASS");
   } else {
+    print_error_data();
     Serial.println("FAIL!!!");
     Serial.flush(); // to be sure
     flash_led();
   }
-  sei();
 }
 
-int
-test(int v) 
+int test(int v) 
 {
-  uint8_t col = 0, row = 0;
+  uint8_t col = 0, row = 0, x = 0;
   v &= 0b1111;
 
+  DDRF |= 0b00001111;   // Set I/Ox as OUTPUT, moved out of w()
   // Write v
   do {
     do {
@@ -252,10 +430,14 @@ test(int v)
     col++;
   } while (col);
 
+  DDRF &= 0b11110000;   // Set I/Ox as INPUT again
+  PORTF |= 0b00001111;  // keep pull-ups
   // Verify
   do {
     do {
-      if (r(row, col) != v) return 0;
+      x = r(row, col);
+      if (x != v)
+        return record_error_data(row, col, v, x);
       row++;
     } while (row);
     col++;
@@ -264,64 +446,197 @@ test(int v)
   return 1;
 }
 
-int
-test_1() {
+int test_1() {
   return test(0b1111);
 }
 
-int
-test_0() {
+int test_0() {
   return test(0b0000);
 }
 
-int
-test_01() {
+int test_01() {
   return test(0b0101);
 }
 
-int
-test_10() {
+int test_10() {
   return test(0b1010);
 }
 
-int
-test_rand() {
-  uint8_t col = 0, row = 0;
-  uint32_t seed = micros();
-
-  // Write
-  prng_state = seed;
+// Break out row write to be usable in test_rand() and test_speed().  We are using
+// a data block with 256 nybbles.
+inline void rand_row_write(uint8_t col) 
+{
+  uint8_t row = 0, pos = 0;
   do {
-    do {
-      w(row, col, prng() & 0b1111);
-      row++;    
-    } while (row);
+    w(row, col, prng_data.b[pos]); // w() does masking
+    row++;
+    w(row, col, prng_data.b[pos]>>4);
+    row++;
+    pos++;
+  } while (row);
+}
+
+// break out row read to work in test_rand() and test_speed().
+inline int rand_row_verify(uint8_t col)
+{
+  uint8_t row = 0, pos = 0;
+  uint8_t v, x;
+  do {
+    v = prng_data.b[pos];
+    x = r(row, col);
+    if (x != (v & 0xf))
+      return record_error_data (row, col, v & 0xf, x);
+    row++;
+    x = r(row, col);
+    if (x != (v >> 4))
+      return record_error_data (row, col, v >> 4, x);
+    row++;
+    pos++;
+  } while (row);
+  return 1;
+}
+
+#ifdef DO_TESTING
+uint8_t start_timer1_measurement()
+{
+  Serial.flush();
+  uint8_t sreg = SREG;
+  cli();
+  TIFR1 = _BV(TOV1);
+  TCNT1 = 0;
+  return sreg;
+}
+
+uint32_t finish_timer1_measurement(uint8_t sreg)
+{
+  uint32_t ticks = TCNT1;
+  if (TIFR1 & _BV(TOV1))
+    ticks += 65536UL;
+  SREG = sreg;
+  return ticks / 2; // 0.5 usec/tick
+}
+
+void test_speed() {
+  uint8_t col = 0, row = 0, v = 0;
+  uint8_t sreg;
+  uint32_t elapsed;
+
+#if 0
+  // Time the prng fill routine
+  sreg = start_timer1_measurement();
+  fill_prng_data();
+  elapsed = finish_timer1_measurement(sreg);
+  Serial.print("Time to generate random row buffer: ");
+  Serial.println(elapsed);
+
+  // Time writing the row data in nybbles
+  DDRF |= 0b00001111;   // Set I/Ox as OUTPUT, moved out of w()
+  sreg = start_timer1_measurement();
+  rand_row_write(col);
+  elapsed = finish_timer1_measurement(sreg);
+  Serial.print("Time to fill a row: ");
+  Serial.println(elapsed);
+
+  DDRF &= 0b11110000;   // Set I/Ox as INPUT again
+  PORTF |= 0b00001111;  // keep pull-ups
+
+  sreg = start_timer1_measurement();
+  int passed = rand_row_verify(col);
+  elapsed = finish_timer1_measurement(sreg);
+  if (!passed) {
+    print_error_data();
+    return;
+  } else {
+    Serial.print("Time to verify a row: ");
+    Serial.println(elapsed);
+  }
+#endif
+
+  DDRF |= 0b00001111;   // Set I/Ox as OUTPUT, moved out of w()
+  // Time generate and fill done at once
+  sreg = start_timer1_measurement();
+  fill_prng_data();
+  rand_row_write(col);
+  elapsed = finish_timer1_measurement(sreg);
+  Serial.print("Time to generate and fill a row: ");
+  Serial.println(elapsed);
+
+  // Time the row write loop from test()
+  row = 0;
+  sreg = start_timer1_measurement();
+  // Write v
+  do {
+    w(row, col, v);
+    row++;
+  } while (row);
+  elapsed = finish_timer1_measurement(sreg);
+  Serial.print("Time to fill with a constant   : ");
+  Serial.println(elapsed);
+  DDRF &= 0b11110000;   // Set I/Ox as INPUT again
+  PORTF |= 0b00001111;  // keep pull-ups
+}
+#endif
+
+/* Improved version of test_rand(). Using an array sized for one complete
+ * row-address sweep leaves enough time to generate new random data, write
+ * all 256 row addresses, and stay comfortably inside the refresh limit.
+ *
+ * DDRF setting is moved from the w() function since this writes in one
+ * fell swoop. Interrupts are disabled around each complete test so UART,
+ * Timer0, and other ISRs cannot delay DRAM accesses.
+ *
+ * DO_TESTING uses hardware Timer1 with interrupts disabled for measurements;
+ * the simavr suite independently checks every /RAS refresh interval.
+ */
+int test_rand() 
+{
+  uint8_t col = 0;
+  uint32_t seed = prng_state;
+
+  DDRF |= 0b00001111;     // Set data pins as OUTPUT, moved out of w()
+  // Send random
+  do {
+    fill_prng_data();
+    rand_row_write(col);
     col++;
   } while (col);
 
-  // Verify
+  DDRF &= 0b11110000;     // Set data pins as INPUT again
+  PORTF |= 0b00001111;    // keep pull-ups
+
+  // Start verify with our same prng seed
   prng_state = seed;
+  col = 0;
+  // Verify what was written
   do {
-    do {
-      if (r(row, col) != (prng() & 0b1111)) return 0;
-      row++;
-    } while (row);
+    fill_prng_data();
+    if (rand_row_verify(col) == 0)
+      return 0;
     col++;
   } while (col);
+
   return 1;
 }
 
 uint32_t loop_count = 0;
 
-void
-loop() {
+void loop() {
+  #ifdef DO_TESTING
+  test_speed();
+  Serial.println();
+  delay(200);
+  #endif
   test_and_print("1111", test_1);
   test_and_print("0000", test_0);
   test_and_print("0101", test_01);
   test_and_print("1010", test_10);
-  // TODO: minimum row refresh cycle of 4 ms can't be guaranteed with the current RNG, let's not do this
-  // test_and_print("rand", test_rand); 
+
+  Serial.print("rand seed: "); 
+  Serial.println(prng_state, HEX);
+  test_and_print("rand", test_rand); 
+
   // Print a count of how many times we've been through the loop
   Serial.print("Test loops: ");
   Serial.println(++loop_count);
+  Serial.println();
 }
