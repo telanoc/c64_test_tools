@@ -50,6 +50,7 @@ void setup()
 {
   dram_test_setup();
 
+  cli();
   simavr_start_trace();
   PORTA = 0xff; // Ensure the first row address produces a trace transition.
 

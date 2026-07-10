@@ -121,10 +121,11 @@ uint32_t prng_state = 0xdecafbad;
  * then a timing of writing the constant values is done.  Those
  * are displayed at the beginning of the test loop.
  * 
- * Sample output, numbers are microseconds and can/will vary.
+ * Timer1 provides the measurements while interrupts are disabled. Sample
+ * output is in microseconds and can vary with compiler settings.
  *
- * Time to generate and fill a row: 1060
- * Time to fill with a constant   : 732
+ * Time to generate and fill a row: 990
+ * Time to fill with a constant   : 672
  *
  */
 //define DO_TESTING
@@ -167,8 +168,6 @@ inline void w(uint8_t row, uint8_t col, uint8_t v);
 
 inline void w(uint8_t row, uint8_t col, uint8_t v) 
 {
-    uint8_t sreg = SREG;
-    cli();                                            // disable interrupts where needed
     PORTF = (PORTF & 0b11110000) | (v & 0b00001111);  // set i/o data
     PORTA = row;                                      // set row
     CLRB(PORTC, nRAS);                                // RAS down
@@ -180,14 +179,11 @@ inline void w(uint8_t row, uint8_t col, uint8_t v)
     SETB(PORTC, nWE);                                 // WE up
     SETB(PORTC, nRAS);                                // RAS up
     SETB(PORTC, nCAS);                                // CAS up
-    SREG = sreg;                                      // restore caller's interrupt state
 }
 
 inline uint8_t r(uint8_t row, uint8_t col)
 {
     // read
-    uint8_t sreg = SREG;
-    cli();                                            // disable interrupts where needed
     PORTA = row;                                      // set row
     CLRB(PORTC, nRAS);                                // RAS down
     asm("nop");                                       // hold >15n (TMS4464 -10)
@@ -199,7 +195,6 @@ inline uint8_t r(uint8_t row, uint8_t col)
     SETB(PORTC, nOE);                                 // OE up
     SETB(PORTC, nRAS);                                // RAS up
     SETB(PORTC, nCAS);                                // CAS up
-    SREG = sreg;                                      // restore caller's interrupt state
     return v;
 }
 
@@ -332,16 +327,42 @@ void setup()
   DDRB     |= 0b10000000;  // Set LED pin (D13) as an output
   LED_ON                ;  // Say "we're testing"
 
+#ifdef DO_TESTING
+  // Timer1 runs at 2 ticks/usec and does not require interrupts.
+  TCCR1A = 0;
+  TCCR1B = _BV(CS11);     // Prescaler 8: 0.5 usec/tick at 16 MHz
+  TIMSK1 = 0;
+  TIFR1 = _BV(TOV1);
+#endif
+
   fill_prng_data();  // Fill data one time to start
 }
 
-int show_error_data(uint8_t e_row, uint8_t e_col, uint8_t e_rng, uint8_t e_ram)
+typedef struct {
+  bool valid;
+  uint8_t row;
+  uint8_t col;
+  uint8_t expected;
+  uint8_t actual;
+} test_error_data;
+
+test_error_data last_error = { false, 0, 0, 0, 0 };
+
+int record_error_data(uint8_t row, uint8_t col, uint8_t expected, uint8_t actual)
 {
-  Serial.print("Error at row "); Serial.print(e_row);
-  Serial.print(" column "); Serial.print(e_col);
-  Serial.print(" Expected: "); Serial.print(e_rng, HEX);
-  Serial.print(" Read: "); Serial.println(e_ram, HEX);
+  last_error = { true, row, col, expected, actual };
   return 0;
+}
+
+void print_error_data()
+{
+  if (!last_error.valid)
+    return;
+
+  Serial.print("Error at row "); Serial.print(last_error.row);
+  Serial.print(" column "); Serial.print(last_error.col);
+  Serial.print(" Expected: "); Serial.print(last_error.expected, HEX);
+  Serial.print(" Read: "); Serial.println(last_error.actual, HEX);
 }
 
 void led_blink(int len)
@@ -378,9 +399,16 @@ void test_and_print(const char *title, int (*test_func)())
   Serial.print("... ");
   Serial.flush();
 
-  if ((*test_func)()) {
+  last_error.valid = false;
+  uint8_t sreg = SREG;
+  cli();
+  int passed = (*test_func)();
+  SREG = sreg;
+
+  if (passed) {
     Serial.println("PASS");
   } else {
+    print_error_data();
     Serial.println("FAIL!!!");
     Serial.flush(); // to be sure
     flash_led();
@@ -409,7 +437,7 @@ int test(int v)
     do {
       x = r(row, col);
       if (x != v)
-        return show_error_data(row, col, v, x);
+        return record_error_data(row, col, v, x);
       row++;
     } while (row);
     col++;
@@ -457,11 +485,11 @@ inline int rand_row_verify(uint8_t col)
     v = prng_data.b[pos];
     x = r(row, col);
     if (x != (v & 0xf))
-      return show_error_data (row, col, v & 0xf, x);
+      return record_error_data (row, col, v & 0xf, x);
     row++;
     x = r(row, col);
     if (x != (v >> 4))
-      return show_error_data (row, col, v >> 4, x);
+      return record_error_data (row, col, v >> 4, x);
     row++;
     pos++;
   } while (row);
@@ -469,81 +497,96 @@ inline int rand_row_verify(uint8_t col)
 }
 
 #ifdef DO_TESTING
+uint8_t start_timer1_measurement()
+{
+  Serial.flush();
+  uint8_t sreg = SREG;
+  cli();
+  TIFR1 = _BV(TOV1);
+  TCNT1 = 0;
+  return sreg;
+}
+
+uint32_t finish_timer1_measurement(uint8_t sreg)
+{
+  uint32_t ticks = TCNT1;
+  if (TIFR1 & _BV(TOV1))
+    ticks += 65536UL;
+  SREG = sreg;
+  return ticks / 2; // 0.5 usec/tick
+}
+
 void test_speed() {
   uint8_t col = 0, row = 0, v = 0;
-  uint32_t start_time, end_time;
+  uint8_t sreg;
+  uint32_t elapsed;
 
 #if 0
   // Time the prng fill routine
-  start_time = micros();
+  sreg = start_timer1_measurement();
   fill_prng_data();
-  end_time = micros();
+  elapsed = finish_timer1_measurement(sreg);
   Serial.print("Time to generate random row buffer: ");
-  Serial.println(end_time - start_time);
+  Serial.println(elapsed);
 
   // Time writing the row data in nybbles
   DDRF |= 0b00001111;   // Set I/Ox as OUTPUT, moved out of w()
-  start_time = micros();
+  sreg = start_timer1_measurement();
   rand_row_write(col);
-  end_time = micros();
+  elapsed = finish_timer1_measurement(sreg);
   Serial.print("Time to fill a row: ");
-  Serial.println(end_time - start_time);
+  Serial.println(elapsed);
 
   DDRF &= 0b11110000;   // Set I/Ox as INPUT again
   PORTF |= 0b00001111;  // keep pull-ups
 
-  start_time = micros();
-  if (rand_row_verify(col) == 0) { // about 860 usec
+  sreg = start_timer1_measurement();
+  int passed = rand_row_verify(col);
+  elapsed = finish_timer1_measurement(sreg);
+  if (!passed) {
+    print_error_data();
     return;
   } else {
-    end_time = micros();
     Serial.print("Time to verify a row: ");
-    Serial.println(end_time - start_time);
+    Serial.println(elapsed);
   }
 #endif
 
   DDRF |= 0b00001111;   // Set I/Ox as OUTPUT, moved out of w()
   // Time generate and fill done at once
-  start_time = micros();
+  sreg = start_timer1_measurement();
   fill_prng_data();
   rand_row_write(col);
-  end_time = micros();
+  elapsed = finish_timer1_measurement(sreg);
   Serial.print("Time to generate and fill a row: ");
-  Serial.println(end_time - start_time);
+  Serial.println(elapsed);
 
   // Time the row write loop from test()
   row = 0;
-  start_time = micros();
+  sreg = start_timer1_measurement();
   // Write v
   do {
     w(row, col, v);
     row++;
   } while (row);
-  end_time = micros();
+  elapsed = finish_timer1_measurement(sreg);
   Serial.print("Time to fill with a constant   : ");
-  Serial.println(end_time - start_time);
+  Serial.println(elapsed);
   DDRF &= 0b11110000;   // Set I/Ox as INPUT again
   PORTF |= 0b00001111;  // keep pull-ups
 }
 #endif
 
-/* Improved version of test_rand().  Using an array of data sized to fit
- * a single row, the code to fill that array winds up taking around 172
- * microseconds.  This leaves plenty of time to write the row, generate a
- * new set of random row data, and move on to the next row.
+/* Improved version of test_rand(). Using an array sized for one complete
+ * row-address sweep leaves enough time to generate new random data, write
+ * all 256 row addresses, and stay comfortably inside the refresh limit.
  *
- * DDRF setting is moved from the w() function since this writes in one 
- * fell swoop.  The w() and r() functions now hold the cli() and sei()
- * calls to keep them limited to where they're needed.
+ * DDRF setting is moved from the w() function since this writes in one
+ * fell swoop. Interrupts are disabled around each complete test so UART,
+ * Timer0, and other ISRs cannot delay DRAM accesses.
  *
- * Results seen when DO_TESTING was defined:
- * Time to generate random row buffer: 172
- * Time to fill a column: 864
- * Time to verify a column: 852
- * Time to generate and fill a row: 1048
- *
- * As a data point, the time that test() takes to write a constant value
- * to a row of ram is about 732 microseconds.
+ * DO_TESTING uses hardware Timer1 with interrupts disabled for measurements;
+ * the simavr suite independently checks every /RAS refresh interval.
  */
 int test_rand() 
 {
@@ -553,8 +596,8 @@ int test_rand()
   DDRF |= 0b00001111;     // Set data pins as OUTPUT, moved out of w()
   // Send random
   do {
-    fill_prng_data();     // Fill row buffer  - About 172 usec 
-    rand_row_write(col);  // Write row buffer - About 864 usec.
+    fill_prng_data();
+    rand_row_write(col);
     col++;
   } while (col);
 
@@ -566,8 +609,8 @@ int test_rand()
   col = 0;
   // Verify what was written
   do {
-    fill_prng_data();               // 172 usec again
-    if (rand_row_verify(col) == 0)  // about 860 usec
+    fill_prng_data();
+    if (rand_row_verify(col) == 0)
       return 0;
     col++;
   } while (col);

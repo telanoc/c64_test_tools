@@ -25,6 +25,8 @@ The suite performs three checks:
    from the `PORTA` and `/RAS` waveform that all 256 DRAM rows are refreshed and
    no same-row interval exceeds 4 ms. Verify sweeps use the simulated input
    pull-ups as an all-ones DRAM response so the success paths run to completion.
+   Interrupts remain disabled during the waveform capture, matching production
+   tests and excluding Timer0 and UART ISR delays.
 
 Remove all downloaded tools and generated files with:
 

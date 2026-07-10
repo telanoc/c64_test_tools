@@ -287,9 +287,9 @@ must refresh all 256 rows without any same-row interval exceeding 4 ms. A
 successful timing report looks like:
 
 ```text
-PASS: 1111 write      726.000 us (11616 cycles), row 0
-PASS: random write   1049.938 us (16799 cycles), row 137
-PASS: overall        1096.188 us (17539 cycles), row 118; 7168 refreshes, limit 4000.000 us
+PASS: 1111 write      672.063 us (10753 cycles), row 0
+PASS: random write    990.063 us (15841 cycles), row 0
+PASS: overall        1040.000 us (16640 cycles), row 0; 7168 refreshes, limit 4000.000 us
 ```
 
 The toolchain and generated files stay in ignored `.pio-core/` and `.pio/`
