@@ -167,6 +167,7 @@ inline void w(uint8_t row, uint8_t col, uint8_t v);
 
 inline void w(uint8_t row, uint8_t col, uint8_t v) 
 {
+    uint8_t sreg = SREG;
     cli();                                            // disable interrupts where needed
     PORTF = (PORTF & 0b11110000) | (v & 0b00001111);  // set i/o data
     PORTA = row;                                      // set row
@@ -179,12 +180,13 @@ inline void w(uint8_t row, uint8_t col, uint8_t v)
     SETB(PORTC, nWE);                                 // WE up
     SETB(PORTC, nRAS);                                // RAS up
     SETB(PORTC, nCAS);                                // CAS up
-    sei();
+    SREG = sreg;                                      // restore caller's interrupt state
 }
 
 inline uint8_t r(uint8_t row, uint8_t col)
 {
     // read
+    uint8_t sreg = SREG;
     cli();                                            // disable interrupts where needed
     PORTA = row;                                      // set row
     CLRB(PORTC, nRAS);                                // RAS down
@@ -197,7 +199,7 @@ inline uint8_t r(uint8_t row, uint8_t col)
     SETB(PORTC, nOE);                                 // OE up
     SETB(PORTC, nRAS);                                // RAS up
     SETB(PORTC, nCAS);                                // CAS up
-    sei();
+    SREG = sreg;                                      // restore caller's interrupt state
     return v;
 }
 
@@ -405,7 +407,8 @@ int test(int v)
   // Verify
   do {
     do {
-      if (x = r(row, col) != v) 
+      x = r(row, col);
+      if (x != v)
         return show_error_data(row, col, v, x);
       row++;
     } while (row);
@@ -452,10 +455,12 @@ inline int rand_row_verify(uint8_t col)
   uint8_t v, x;
   do {
     v = prng_data.b[pos];
-    if (x = r(row, col) != (v & 0xf))
+    x = r(row, col);
+    if (x != (v & 0xf))
       return show_error_data (row, col, v & 0xf, x);
     row++;
-    if (x = r(row, col) != (v >> 4))
+    x = r(row, col);
+    if (x != (v >> 4))
       return show_error_data (row, col, v >> 4, x);
     row++;
     pos++;
@@ -489,7 +494,7 @@ void test_speed() {
 
   start_time = micros();
   if (rand_row_verify(col) == 0) { // about 860 usec
-    return 0;
+    return;
   } else {
     end_time = micros();
     Serial.print("Time to verify a row: ");
@@ -543,7 +548,6 @@ void test_speed() {
 int test_rand() 
 {
   uint8_t col = 0;
-  uint8_t v;
   uint32_t seed = prng_state;
 
   DDRF |= 0b00001111;     // Set data pins as OUTPUT, moved out of w()

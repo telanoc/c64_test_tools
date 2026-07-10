@@ -268,6 +268,39 @@ Driving /CE high disables the chip and should read `ff` throughout the entire du
 
 A valid dump with /CE high means the chip **FAILS** to obey the /CE line.
 
+## Tests
+
+The only prerequisite is [`uv`](https://docs.astral.sh/uv/getting-started/installation/),
+which installs both `uv` and `uvx`. The runner uses isolated, pinned PlatformIO
+and Python environments and downloads Python automatically if necessary. From
+the repository root, run:
+
+```sh
+./tests/run.sh
+```
+
+When using `uv`, the first run obtains Python and a pinned PlatformIO launcher
+as needed, then downloads a pinned AVR compiler, Arduino framework, and simavr.
+It compiles the normal sketch, compiles the optional `DO_TESTING` code, and
+checks the `/RAS` waveform for every pattern and random test phase. Each phase
+must refresh all 256 rows without any same-row interval exceeding 4 ms. A
+successful timing report looks like:
+
+```text
+PASS: 1111 write      726.000 us (11616 cycles), row 0
+PASS: random write   1049.938 us (16799 cycles), row 137
+PASS: overall        1096.188 us (17539 cycles), row 118; 7168 refreshes, limit 4000.000 us
+```
+
+The toolchain and generated files stay in ignored `.pio-core/` and `.pio/`
+directories. Remove them completely with:
+
+```sh
+rm -rf .pio .pio-core
+```
+
+See [tests/README.md](tests/README.md) for implementation details.
+
 ## Thanks
 
  * [Zimmers invaluable archive of pinouts, schematics and documents](http://www.zimmers.net/anonftp/pub/cbm/index.html)
@@ -276,4 +309,3 @@ A valid dump with /CE high means the chip **FAILS** to obey the /CE line.
  * [Commodore 64: how to repair it, step by step](http://retro64.altervista.org/blog/commodore-64-repair-a-quick-guide-on-the-steps-required-to-fix-it/)
  * [Arduino ASCII diagrams](http://busyducks.com/ascii-art-arduinos)
  * ... and Commodore Business Machines for making the BEST COMPUTER EVER
-
